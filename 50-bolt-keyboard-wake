@@ -1,0 +1,51 @@
+#!/bin/sh
+# Work around spurious suspend wake on the MX Keys S with a Logi Bolt receiver.
+# Detach only the boot keyboard interface. The receiver still handles USB wake.
+set -eu
+
+[ "${2-}" = suspend ] || exit 0
+
+usb=/sys/bus/usb/devices
+driver=/sys/bus/usb/drivers/usbhid
+state=/run/bolt-keyboard-wake
+
+is_bolt_receiver() {
+    [ "$(cat "$1/idVendor" 2>/dev/null)" = 046d ] &&
+        [ "$(cat "$1/idProduct" 2>/dev/null)" = c548 ]
+}
+
+case "${1-}" in
+    pre)
+        for receiver in "$usb"/*; do
+            is_bolt_receiver "$receiver" || continue
+            [ "$(cat "$receiver/power/wakeup" 2>/dev/null)" = enabled ] || continue
+            interface="${receiver##*/}:1.0"
+            [ -L "$driver/$interface" ] || continue
+            [ "$(cat "$usb/$interface/bInterfaceProtocol" 2>/dev/null)" = 01 ] || continue
+
+            mkdir -p -m 0700 "$state"
+            : > "$state/$interface"
+            if printf '%s\n' "$interface" > "$driver/unbind"; then
+                printf 'Bolt keyboard %s detached for suspend\n' "$interface"
+            else
+                rm -f "$state/$interface"
+            fi
+        done
+        ;;
+    post)
+        for marker in "$state"/*; do
+            [ -f "$marker" ] || continue
+            interface=${marker##*/}
+            receiver="$usb/${interface%:1.0}"
+            if is_bolt_receiver "$receiver" && [ -d "$usb/$interface" ] &&
+                [ ! -L "$usb/$interface/driver" ]; then
+                if ! printf '%s\n' "$interface" > "$driver/bind"; then
+                    printf 'Could not restore Bolt keyboard %s. Replug the Bolt receiver.\n' "$interface" >&2
+                    continue
+                fi
+                printf 'Bolt keyboard %s restored after resume\n' "$interface"
+            fi
+            rm -f "$marker"
+        done
+        ;;
+esac
